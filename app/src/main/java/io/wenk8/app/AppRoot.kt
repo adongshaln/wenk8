@@ -44,17 +44,18 @@ fun Wenk8AppRoot(app: Wenk8App) {
         if (uris.isEmpty()) return@rememberLauncherForActivityResult
         scope.launch {
             for (uri in uris) {
-                runCatching {
-                    val name = uri.lastPathSegment?.substringAfterLast('/') ?: "book"
+                val ok = runCatching {
+                    val name = uri.lastPathSegment?.substringAfterLast('/') ?: return@runCatching false
                     val tmp = java.io.File(context.cacheDir, name)
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        tmp.outputStream().use { input.copyTo(it) }
-                    } ?: continue
+                    val stream = context.contentResolver.openInputStream(uri) ?: return@runCatching false
+                    stream.use { input -> tmp.outputStream().use { input.copyTo(it) } }
                     val isEpub = name.lowercase().endsWith(".epub")
                     if (isEpub) app.library.addEpub(tmp, null, null)
                     else app.library.addTxt(tmp, null, null)
                     tmp.delete()
-                }
+                    true
+                }.getOrDefault(false)
+                if (!ok) continue
             }
         }
     }
