@@ -12,6 +12,7 @@ class Wenk8App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        CrashGuard.install(this)
         library = LibraryRepo(this, appScope)
     }
 }

@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashGuard.install(applicationContext)
         enableEdgeToEdge()
         val app = application as Wenk8App
         setContent {

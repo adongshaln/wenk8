@@ -22,6 +22,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -42,6 +43,11 @@ fun DiscoverScreen(
     val paper = MaterialTheme.colorScheme.background
     val ink = MaterialTheme.colorScheme.onBackground
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val context = LocalContext.current
+
+    // 上次崩溃的报告：弹出供用户复制反馈，看后即清
+    val crash = remember { CrashGuard.lastCrash(context) }
+    var showCrash by remember { mutableStateOf(crash != null) }
 
     var featured by remember(series) { mutableIntStateOf(0) }
     val current = series.getOrNull(featured % series.size.coerceAtLeast(1))
@@ -178,6 +184,36 @@ fun DiscoverScreen(
                     }
                 }
             }
+        }
+
+        // ---------- 上次崩溃报告：可复制反馈 ----------
+        if (showCrash && crash != null) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showCrash = false; CrashGuard.clear(context) },
+                title = { Text("上次异常退出", fontFamily = FontFamily.Serif, fontWeight = FontWeight.Bold) },
+                text = {
+                    androidx.compose.foundation.text.selection.SelectionContainer {
+                        Text(
+                            crash.take(1600),
+                            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.verticalScroll(rememberScrollState()).heightIn(max = 320.dp),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(android.content.Intent.EXTRA_TEXT, crash)
+                        }
+                        runCatching { context.startActivity(android.content.Intent.createChooser(send, "发送崩溃报告")) }
+                        showCrash = false; CrashGuard.clear(context)
+                    }) { Text("复制/发送") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showCrash = false; CrashGuard.clear(context) }) { Text("关闭") }
+                },
+            )
         }
     }
 }
