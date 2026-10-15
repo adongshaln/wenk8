@@ -37,7 +37,6 @@ object CrashGuard {
             appendLine("=== WENK8 崩溃报告 ===")
             appendLine("时间: ${System.currentTimeMillis()}")
             appendLine("设备: ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
-            appendLine("版本: ${BuildConfig.VERSION_NAME}")
             appendLine("线程: ${thread.name}")
             appendLine(sw.toString())
         }
