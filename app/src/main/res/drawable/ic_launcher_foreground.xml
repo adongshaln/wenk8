@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- W8 墨块 + 三本书脊 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 三根书脊 -->
+    <path android:fillColor="#F1EDE2" android:pathData="M30,34 h8 v44 h-8 z" />
+    <path android:fillColor="#DDD7C6" android:pathData="M42,30 h8 v48 h-8 z" />
+    <path android:fillColor="#C9C2AE" android:pathData="M54,36 h8 v42 h-8 z" />
+    <!-- 抽出的一本 -->
+    <path android:fillColor="#F5F2EA" android:pathData="M66,26 h10 v52 h-10 z" />
+    <path android:strokeColor="#211D16" android:strokeWidth="1.2" android:pathData="M71,32 v40" />
+</vector>

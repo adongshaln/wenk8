@@ -1,0 +1,210 @@
+name: 构建并发布 APK
+
+# 触发方式：
+#   1. 推送 v 开头的 tag（如 v0.1.0）—— 正式发版
+#   2. Actions 页面手动触发 —— 临时验证构建
+#
+# 零配置、全流程无人值守：
+#   - 版本号自动注入：versionName = tag 去掉 v 前缀，versionCode = 提交总数，发版无需改代码
+#   - 签名三级来源：仓库 Secrets -> 复用上一个 Release 附带的密钥 -> 现场新生成
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '版本标签，例如 v0.1.0'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  release-apk:
+    name: 构建 APK 并发布
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算版本号
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$TAG_INPUT"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION_NAME=${TAG#v}" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION_CODE=$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+          echo "版本：${TAG#v}（versionCode $(git rev-list --count HEAD)）"
+
+      - name: 设置 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 设置 Gradle 并启用缓存
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 准备签名密钥（Secrets -> 上个 Release -> 新生成）
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          SIGN_DIR="$RUNNER_TEMP/signing"
+          mkdir -p "$SIGN_DIR"
+
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "签名来源：仓库 Secrets"
+            echo "SIGNING_SOURCE=secrets" >> "$GITHUB_ENV"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$SIGN_DIR/signing-keystore.jks"
+            {
+              echo "storeFile=$SIGN_DIR/signing-keystore.jks"
+              echo "storePassword=$KEYSTORE_PASSWORD"
+              echo "keyAlias=$KEY_ALIAS"
+              echo "keyPassword=$KEY_PASSWORD"
+            } > keystore.properties
+
+          elif gh release view --json assets -q '.assets[].name' 2>/dev/null | grep -qx 'signing-keystore.jks'; then
+            echo "签名来源：复用上一个 Release 附带的密钥"
+            echo "SIGNING_SOURCE=reused" >> "$GITHUB_ENV"
+            gh release download --pattern 'signing-keystore.jks' --pattern 'signing-credentials.txt' --dir "$SIGN_DIR"
+            {
+              echo "storeFile=$SIGN_DIR/signing-keystore.jks"
+              grep -E '^(storePassword|keyAlias|keyPassword)=' "$SIGN_DIR/signing-credentials.txt"
+            } > keystore.properties
+
+          else
+            echo "签名来源：现场新生成密钥"
+            echo "SIGNING_SOURCE=generated" >> "$GITHUB_ENV"
+            PASS="$(openssl rand -hex 16)"
+            keytool -genkeypair -v \
+              -keystore "$SIGN_DIR/signing-keystore.jks" \
+              -alias wenk8 -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$PASS" -keypass "$PASS" \
+              -dname "CN=wenk8, OU=wenk8, O=wenk8, L=NA, S=NA, C=CN" > /dev/null 2>&1
+            {
+              echo "storeFile=$SIGN_DIR/signing-keystore.jks"
+              echo "storePassword=$PASS"
+              echo "keyAlias=wenk8"
+              echo "keyPassword=$PASS"
+            } > keystore.properties
+            {
+              echo "storePassword=$PASS"
+              echo "keyAlias=wenk8"
+              echo "keyPassword=$PASS"
+            } > "$SIGN_DIR/signing-credentials.txt"
+          fi
+
+      - name: 注入版本号与签名配置
+        run: |
+          # versionName/versionCode 由 tag 注入；签名走 keystore.properties
+          sed -i "s/versionName = \".*\"/versionName = \"$RELEASE_VERSION_NAME\"/" app/build.gradle.kts
+          sed -i "s/versionCode = .*/versionCode = $RELEASE_VERSION_CODE/" app/build.gradle.kts
+          {
+            echo "signingConfigs {"
+            echo "  create(\"release\") {"
+            echo "    val props = java.util.Properties()"
+            echo "    val f = rootProject.file(\"keystore.properties\")"
+            echo "    if (f.exists()) f.inputStream().use { props.load(it) }"
+            echo "    storeFile = file(props.getProperty(\"storeFile\", \"\"))"
+            echo "    storePassword = props.getProperty(\"storePassword\", \"\")"
+            echo "    keyAlias = props.getProperty(\"keyAlias\", \"\")"
+            echo "    keyPassword = props.getProperty(\"keyPassword\", \"\")"
+            echo "  }"
+            echo "}"
+          } > signing-config.gradle.kts
+          echo "版本号与签名配置已注入"
+
+      - name: 启用 Release 签名
+        run: |
+          # 在 build.gradle.kts 的 release 块中启用签名
+          python3 - <<'EOF'
+          import re
+          src = open('app/build.gradle.kts').read()
+          src = src.replace(
+              'buildTypes {\n        release {',
+              'apply(from = "../signing-config.gradle.kts")\n\n    buildTypes {\n        release {\n            signingConfig = signingConfigs.getByName("release")'
+          )
+          open('app/build.gradle.kts', 'w').write(src)
+          EOF
+          grep -n "signingConfig" app/build.gradle.kts
+
+      - name: 构建 Release APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: 整理发布产物
+        run: |
+          DIST="$RUNNER_TEMP/dist"
+          mkdir -p "$DIST"
+          COUNT=0
+          for apk in app/build/outputs/apk/release/*.apk; do
+            [ -e "$apk" ] || continue
+            base="$(basename "$apk" .apk)"
+            if [ "$base" = "app-release" ]; then
+              cp "$apk" "$DIST/wenk8-${TAG}-release.apk"
+            else
+              cp "$apk" "$DIST/wenk8-${TAG}-${base#app-}.apk"
+            fi
+            COUNT=$((COUNT + 1))
+          done
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::未找到 APK 产物，构建步骤可能已失败"
+            exit 1
+          fi
+          if [ "$SIGNING_SOURCE" != "secrets" ]; then
+            cp "$RUNNER_TEMP/signing/signing-keystore.jks" "$DIST/"
+            cp "$RUNNER_TEMP/signing/signing-credentials.txt" "$DIST/"
+          fi
+          ls -lh "$DIST"
+
+      - name: 发布到 GitHub Release
+        run: |
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES_EOF'
+          ## 下载与安装
+          1. 用手机浏览器打开本页面，展开下方 **Assets**，点击 `.apk` 文件下载（私有仓库需先登录 GitHub）。
+          2. 点开下载的文件进行安装；系统提示"未知来源/允许安装"时同意即可。
+
+          ## 轻小说文库 WENK8
+          纸墨风格的原生安卓轻小说阅读器。支持导入 TXT / EPUB，本地书架，章节进度记忆。
+          NOTES_EOF
+          {
+            echo ""
+            echo "## 版本信息"
+            echo "- 版本：${RELEASE_VERSION_NAME}（versionCode ${RELEASE_VERSION_CODE}）"
+            case "$SIGNING_SOURCE" in
+              secrets)
+                echo "- 签名：使用仓库 Secrets 中的正式密钥"
+                ;;
+              reused)
+                echo "- 签名：复用历史密钥，可与已安装的旧版本直接覆盖安装"
+                ;;
+              generated)
+                echo "- 签名：本次自动生成了新密钥，已随 Assets 附带 \`signing-keystore.jks\` 与 \`signing-credentials.txt\`。"
+                echo "  升级版本时会自动复用该密钥；建议下载备份。若仓库为公开，建议将密钥转存为仓库 Secrets 后删除这两个附件。"
+                ;;
+            esac
+          } >> "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" \
+            "$RUNNER_TEMP"/dist/* \
+            --title "轻小说文库 ${TAG}" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            || gh release upload "$TAG" "$RUNNER_TEMP"/dist/* --clobber
+          echo "### 发版完成" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 标签：\`$TAG\`（版本 ${RELEASE_VERSION_NAME}，versionCode ${RELEASE_VERSION_CODE}）" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 签名来源：$SIGNING_SOURCE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- 下载地址：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"
